@@ -10,6 +10,8 @@
 #include <arpa/nameser.h>
 #include <resolv.h>
 #include <netdb.h>
+#include <pthread.h>
+#include <ctype.h>
 
 // Ethernet и ARP
 #include <net/ethernet.h>       // ETH_P_*, struct ether_header
@@ -89,7 +91,7 @@ typedef struct {
     unsigned long other_count;
     int resolved;
 } IpStat;
-IPStat ip_stats[MAX_IPS];
+IpStat ip_stats[MAX_IPS];
 int ip_stats_count = 0;
 
 typedef struct {
@@ -341,8 +343,9 @@ int dequeue_ip(char* ip_out) {
 }
 
 void *resolver_thread_func(void *arg) {
-    while (true) {
-        char *ip = dequeue_ip();
+    while (1) {
+        char ips[INET_ADDRSTRLEN];
+        char *ip = dequeue_ip(ips);
         if (ip == NULL) { // время завершаться
             break;
         }
@@ -505,16 +508,13 @@ void start_sniffer(const char *iface, const char *filter_exp) {
 
 void clear_ip_queue() {
     pthread_mutex_lock(&queue_mutex);
-    while (queue_start != queue_end) {
-        free(ip_queue[queue_start]);
-        queue_start = (queue_start + 1) % MAX_IPS;
-    }
+    queue_start =queue_end = 0;
     pthread_mutex_unlock(&queue_mutex);
 }
 
 int main() {
     pthread_t resolver_thread;
-    pthread_create(&resolver_thread, NULL, resolver_thread_func, NULL)
+    pthread_create(&resolver_thread, NULL, resolver_thread_func, NULL);
     while (1) {
         int choice = main_menu();
         if (choice == 4) {
@@ -547,8 +547,7 @@ int main() {
         free(iface);
     }
 
-    thread_mutex_lock(&queue_mutex);
-    resolver_running = false;
+    pthread_mutex_lock(&queue_mutex);
     pthread_cond_signal(&queue_cond);
     pthread_mutex_unlock(&queue_mutex);
 
@@ -556,6 +555,14 @@ int main() {
 
     clear_ip_queue();
 
+    return 0;
+}
+
+int compare_by_bytes_desc(const void *a, const void *b) {
+    const IpStat *statA = (const IpStat *)a;
+    const IpStat *statB = (const IpStat *)b;
+    if (statB->total_bytes > statA->total_bytes) return 1;
+    if (statB->total_bytes < statA->total_bytes) return -1;
     return 0;
 }
 
@@ -571,7 +578,7 @@ void print_statistics() {
     printf("\n===== Статистика по IP ) =====\n");
 
     // сортировка
-    qsort(ip_stats, ip_stats_count, sizeof(IPStat), compare_by_bytes_desc);
+    qsort(ip_stats, ip_stats_count, sizeof(IpStat), compare_by_bytes_desc);
      printf("%-40s | %6s | %8s | TCP | UDP | ICMP | IGMP | ESP | GRE | Другое\n", 
            "IP / Hostname", "Всего Пакетов", "Размер");
     printf("--------------------------------------------------------------------------------------\n");
@@ -599,15 +606,6 @@ void print_statistics() {
     printf("=====================================================\n");
 }
 
-int compare_by_bytes_desc(const void *a, const void *b) {
-    const IPStat *statA = (const IPStat *)a;
-    const IPStat *statB = (const IPStat *)b;
-    if (statB->total_bytes > statA->total_bytes) return 1;
-    if (statB->total_bytes < statA->total_bytes) return -1;
-    return 0;
-}
-
-
 void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
     for (int i = 0; i < ip_stats_count; ++i) {
         if (strcmp(ip_stats[i].ip, ip) == 0) {
@@ -628,7 +626,7 @@ void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
 
     if (ip_stats_count >= MAX_IPS) return;
 
-    IPStat new_stat = {0};
+    IpStat new_stat = {0};
     strncpy(new_stat.ip, ip, INET_ADDRSTRLEN);
     new_stat.total_packets = 1;
     new_stat.total_bytes = pkt_len;
@@ -652,8 +650,6 @@ void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
     // Добавляем IP в очередь на асинхронный резолвинг
     enqueue_ip(ip);
 }
-
-
 
 int get_tcp_payload_offset(const unsigned char *packet, int size, int datalink_type) {
     int offset = 0;
