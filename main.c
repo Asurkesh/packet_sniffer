@@ -113,12 +113,12 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
             unsigned char *target_ip_ptr  = arp_ptr + 16;
 
             snprintf(sender_mac, sizeof(sender_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-                     sender_mac_ptr[0], sender_mac_ptr[1], sender_mac_ptr[2],
-                     sender_mac_ptr[3], sender_mac_ptr[4], sender_mac_ptr[5]);
+                    sender_mac_ptr[0], sender_mac_ptr[1], sender_mac_ptr[2],
+                    sender_mac_ptr[3], sender_mac_ptr[4], sender_mac_ptr[5]);
 
             snprintf(target_mac, sizeof(target_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-                     target_mac_ptr[0], target_mac_ptr[1], target_mac_ptr[2],
-                     target_mac_ptr[3], target_mac_ptr[4], target_mac_ptr[5]);
+                    target_mac_ptr[0], target_mac_ptr[1], target_mac_ptr[2],
+                    target_mac_ptr[3], target_mac_ptr[4], target_mac_ptr[5]);
 
             inet_ntop(AF_INET, sender_ip_ptr, sender_ip, sizeof(sender_ip));
             inet_ntop(AF_INET, target_ip_ptr, target_ip, sizeof(target_ip));
@@ -126,10 +126,10 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
             printf(COLOR_PROTO "[ARP] " COLOR_RESET);
             if (ntohs(arp_header->ar_op) == ARPOP_REQUEST) {
                 printf("Запрос: кто имеет " COLOR_IP "%s" COLOR_RESET "? Скажите " COLOR_MAC "%s" COLOR_RESET "\n",
-                       target_ip, sender_mac);
+                    target_ip, sender_mac);
             } else if (ntohs(arp_header->ar_op) == ARPOP_REPLY) {
                 printf("Ответ: " COLOR_IP "%s" COLOR_RESET " имеет MAC " COLOR_MAC "%s" COLOR_RESET "\n",
-                       sender_ip, sender_mac);
+                    sender_ip, sender_mac);
             } else {
                 printf("Неизвестная операция ARP\n");
             }
@@ -163,8 +163,35 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
             const struct tcphdr *tcph = (const struct tcphdr *)(packet + ip_header_offset + iph->ihl * 4);
             printf(COLOR_PROTO "[TCP] " COLOR_RESET);
             printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
-                   src_ip, COLOR_PORT, ntohs(tcph->source),
-                   dst_ip, COLOR_PORT, ntohs(tcph->dest));
+                src_ip, COLOR_PORT, ntohs(tcph->source),
+                dst_ip, COLOR_PORT, ntohs(tcph->dest));
+
+            //
+            printf("Флаг: ");
+                if (tcph->th_flags & TH_SYN) printf("SYN ");
+                if (tcph->th_flags & TH_ACK) printf("ACK ");
+                if (tcph->th_flags & TH_FIN) printf("FIN ");
+                if (tcph->th_flags & TH_RST) printf("RST ");
+                if (tcph->th_flags & TH_PUSH) printf("PSH ");
+                if (tcph->th_flags & TH_URG) printf("URG ");
+
+            if ((ntohs(tcph->th_dport) == 80 || ntohs(tcph->th_sport) == 80 ||
+                ntohs(tcph->th_dport) == 8080 || ntohs(tcph->th_sport) == 8080) &&
+                size > payload_offset) {
+
+                const char *payload = (const char *)(packet + payload_offset);
+                int plen = size - payload_offset;
+
+                if (plen > 0 && isprint(payload[0])) {
+                    printf(COLOR_HTTP "HTTP: ");
+                    for (int i = 0; i < plen && i < 200; i++) {
+                        if (payload[i] == '\r' || payload[i] == '\n') break;
+                        putchar(payload[i]);
+                    }
+                    printf("\n" COLOR_RESET);
+                }
+            }
+
         } else if (iph->protocol == IPPROTO_UDP) {
             if (size < ip_header_offset + iph->ihl * 4 + sizeof(struct udphdr)) {
                 printf("Пакет слишком короткий для UDP\n\n");
@@ -173,8 +200,27 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
             const struct udphdr *udph = (const struct udphdr *)(packet + ip_header_offset + iph->ihl * 4);
             printf(COLOR_PROTO "[UDP] " COLOR_RESET);
             printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
-                   src_ip, COLOR_PORT, ntohs(udph->source),
-                   dst_ip, COLOR_PORT, ntohs(udph->dest));
+                src_ip, COLOR_PORT, ntohs(udph->source),
+                dst_ip, COLOR_PORT, ntohs(udph->dest));
+
+            //
+            uint16_t sport = ntohs(udph->uh_sport);
+            uint16_t dport = ntohs(udph->uh_dport);
+            if (sport == 53 || dport == 53) {
+                const unsigned char *dns = packet + ip_header_offset + ip_header_len + sizeof(struct udphdr);
+                int qname_offset = 12; // после заголовка DNS
+
+                printf(COLOR_DNS "DNS очередь/ответ: ");
+                while (dns[qname_offset] != 0 && qname_offset < size) {
+                    int len = dns[qname_offset];
+                    qname_offset++;
+                    for (int j = 0; j < len; j++) {
+                        putchar(dns[qname_offset++]);
+                    }
+                    if (dns[qname_offset] != 0) putchar('.');
+                }
+            }
+
         } else {
             printf(COLOR_PROTO "[IPv4 протокол %d] " COLOR_RESET, iph->protocol);
             printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
@@ -193,9 +239,25 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
         char src_ip[INET6_ADDRSTRLEN], dst_ip[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &(ip6h->ip6_src), src_ip, sizeof(src_ip));
         inet_ntop(AF_INET6, &(ip6h->ip6_dst), dst_ip, sizeof(dst_ip));
-
         printf(COLOR_PROTO "[IPv6] " COLOR_RESET);
         printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
+
+        //
+        if (ip_proto == IPPROTO_ICMP) {
+            const struct icmphdr *icmp = (const struct icmphdr *)(packet + ip_header_offset + ip_header_len);
+            printf(COLOR_ICMP "ICMP тип=%d код=%d", icmp->type, icmp->code);
+            if (icmp->type == 8)
+                printf(" (Echo запрос)");
+            else if (icmp->type == 0)
+                printf(" (Echo ответ)");
+        }
+
+        if (ip_proto == IPPROTO_ICMPV6) {
+            const struct icmp6_hdr *icmp6 = (const struct icmp6_hdr *)(packet + ip_header_offset + ip_header_len);
+            printf(COLOR_ICMP "ICMPv6 тип=%d код=%d\n" COLOR_RESET, icmp6->icmp6_type, icmp6->icmp6_code);
+        }
+
+
     } else {
         printf(COLOR_PROTO "[Неизвестный протокол]" COLOR_RESET);
     }
