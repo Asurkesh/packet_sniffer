@@ -64,16 +64,19 @@
 #define COLOR_DNS "\033[1;37m"
 #define COLOR_HTTP "\033[1;40m"
 #define COLOR_ICMP "\033[1;38m"
-#define MAX_IPS 1000
+#define MAX_IPS 2048
 
 typedef struct {
-    unsigned long total_packets;
-    unsigned long tcp_count;
-    unsigned long udp_count;
-    unsigned long arp_count;
-    unsigned long ipv6_count;
-    unsigned long other_count;
+    unsigned long total_packets;   // Всего пакетов
+    unsigned long tcp_count;       // TCP-пакеты
+    unsigned long udp_count;       // UDP-пакеты
+    unsigned long icmp_count;      // ICMP-пакеты
+    unsigned long igmp_count;      // IGMP-пакеты
+    unsigned long arp_count;       // ARP-пакеты
+    unsigned long ipv6_count;      // IPv6-пакеты
+    unsigned long other_count;     // Другие пакеты
 } Stats;
+
 Stats stats = {0};
 
 typedef struct {
@@ -302,32 +305,64 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
 
 void packet_handler(unsigned char *args, const struct pcap_pkthdr *header, const unsigned char *packet) {
     int datalink_type = *(int *)args;
+    int ip_offset = get_ip_header_offset(datalink_type);
     stats.total_packets++;
-    const struct ether_header *eth_header = (struct ether_header *)packet;
-    u_short ether_type = ntohs(eth_header->ether_type);
 
-    if (ether_type == ETHERTYPE_IP) {
-        const struct ip *ip_hdr = (struct ip *)(packet + 14);
+    if (header->len < ip_offset + 1) {
+        fprintf(stderr, "Пакет слишком короткий\n");
+        return;
+    }
+
+    // Определим IP-версию (IPv4 или IPv6)
+    uint8_t version = (packet[ip_offset] & 0xF0) >> 4;
+
+    if (version == 4) {
+        if (header->len < ip_offset + sizeof(struct ip)) {
+            fprintf(stderr, "Пакет слишком короткий для IPv4\n");
+            return;
+        }
+
+        const struct ip *ip_hdr = (struct ip *)(packet + ip_offset);
         char src_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(ip_hdr->ip_src), src_ip, INET_ADDRSTRLEN);
 
         update_ip_stat(src_ip, ip_hdr->ip_p, header->len);
 
-        if (ip_hdr->ip_p == IPPROTO_TCP)
-            stats.tcp_count++;
-        else if (ip_hdr->ip_p == IPPROTO_UDP)
-            stats.udp_count++;
-        else
-            stats.other_count++;
-    } else if (ether_type == ETHERTYPE_IPV6) {
+        switch (ip_hdr->ip_p) {
+            case IPPROTO_TCP: stats.tcp_count++; break;
+            case IPPROTO_UDP: stats.udp_count++; break;
+            case IPPROTO_ICMP: stats.icmp_count++; break;
+            case IPPROTO_IGMP: stats.igmp_count++; break;
+            default: stats.other_count++; break;
+        }
+
+    } else if (version == 6) {
+        if (header->len < ip_offset + sizeof(struct ip6_hdr)) {
+            fprintf(stderr, "Пакет слишком короткий для IPv6\n");
+            return;
+        }
+
+        const struct ip6_hdr *ip6_hdr = (struct ip6_hdr *)(packet + ip_offset);
+        char src_ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &(ip6_hdr->ip6_src), src_ip, INET6_ADDRSTRLEN);
+
+        update_ip_stat(src_ip, ip6_hdr->ip6_nxt, header->len);
+
+        switch (ip6_hdr->ip6_nxt) {
+            case IPPROTO_TCP: stats.tcp_count++; break;
+            case IPPROTO_UDP: stats.udp_count++; break;
+            case IPPROTO_ICMPV6: stats.icmp_count++; break;
+            default: stats.other_count++; break;
+        }
+
         stats.ipv6_count++;
-    } else if (ether_type == ETHERTYPE_ARP) {
-        stats.arp_count++;
+
     } else {
+        // Не IP-пакет
         stats.other_count++;
     }
-    print_packet(packet, header->len, datalink_type);
 
+    print_packet(packet, header->len, datalink_type);
 }
 
 char *select_interface() {
@@ -483,6 +518,8 @@ void print_statistics() {
     printf("Всего пакетов: %lu\n", stats.total_packets);
     printf("TCP:           %lu\n", stats.tcp_count);
     printf("UDP:           %lu\n", stats.udp_count);
+    printf("ICMP:          %lu\n", stats.icmp_count);
+    printf("IGMP:          %lu\n", stats.igmp_count);
     printf("ARP:           %lu\n", stats.arp_count);
     printf("IPv6:          %lu\n", stats.ipv6_count);
     printf("Другое:        %lu\n", stats.other_count);
@@ -491,10 +528,11 @@ void print_statistics() {
 
     // сортировка
     qsort(ip_stats, ip_stats_count, sizeof(IpStat), compare_by_bytes_desc);
-    printf("%-40s | %6s | %8s | TCP | UDP | ICMP | IGMP | ESP | GRE | Другое\n", 
+    printf("%-16s | %6s | %8s | TCP | UDP | ICMP | IGMP | ESP | GRE | Другое\n", 
            "IP ", "Всего Пакетов", "Размер");
     printf("--------------------------------------------------------------------------------------\n");
 
+    for (int i = 0; i < ip_stats_count; i++){
         printf("%-40s | %6lu | %8lu | %3lu | %3lu |  %3lu |  %3lu | %3lu | %3lu |  %3lu\n",
             ip_stats[i].ip,
             ip_stats[i].total_packets,
@@ -513,7 +551,7 @@ void print_statistics() {
     printf("=====================================================\n");
 }
 
-void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
+void update_ip_stat(const char *ip, u_char proto, unsigned int pkt_len) {
     // Поиск существующего IP в статистике
     for (int i = 0; i < ip_stats_count; ++i) {
         if (strcmp(ip_stats[i].ip, ip) == 0) {
