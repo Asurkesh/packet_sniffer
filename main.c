@@ -3,28 +3,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-#include <arpa/inet.h>
-#include <netinet/ip.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
 #include <unistd.h>
-#include <netinet/ether.h>   // struct ether_header
 #include <time.h>
-#include <net/if_arp.h>
-#include <net/ethernet.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pcap.h>
-#include <arpa/inet.h>
-#include <netinet/ip.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
-#include <netinet/if_ether.h>
-#include <netinet/ip_icmp.h>
 #include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
+#include <arpa/inet.h>
+
+// Ethernet и ARP
+#include <net/ethernet.h>       // ETH_P_*, struct ether_header
+#include <net/if_arp.h>
+
+// IPv4 / IPv6
+#include <netinet/ip.h>         // struct iphdr
+#include <netinet/ip6.h>        // struct ip6_hdr
+#include <netinet/ip_icmp.h>    // struct icmphdr
+
+// TCP/UDP
+#include <netinet/tcp.h>        // struct tcphdr
+#include <netinet/udp.h>        // struct udphdr
+
+// Дубликат для struct ether_header (если <net/ethernet.h> не хватает)
+#include <netinet/if_ether.h>   // struct ether_header, ETHERTYPE_IP
+
 
 #define COLOR_RESET "\033[0m"
 #define COLOR_PROTO "\033[1;34m"
