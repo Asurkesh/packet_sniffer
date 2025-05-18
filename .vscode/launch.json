@@ -19,7 +19,7 @@
         "ignoreFailures": true
         }
     ],
-    "preLaunchTask": "Скомпилировать sniffer",
+    "preLaunchTask": "setcap sniffer",
     "miDebuggerPath": "/usr/bin/gdb"
     }
 ]

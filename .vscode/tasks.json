@@ -18,8 +18,7 @@
       "group": {
         "kind": "build",
         "isDefault": true
-      },
-      "dependsOn": ["setcap sniffer"]
+      }
     },
     {
       "label": "setcap sniffer",
@@ -30,7 +29,8 @@
         "cap_net_raw,cap_net_admin=eip",
         "${workspaceFolder}/sniffer"
       ],
-      "problemMatcher": []
+      "problemMatcher": [],
+      "dependsOn": ["Скомпилировать sniffer"]
     }
   ]
 }
