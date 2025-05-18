@@ -40,8 +40,7 @@ void signal_handler(int sig) {
     }
 }
 
-void print_packet(const unsigned char *packet, int size) {
-    int eth_header_len = 14;
+void print_packet(const unsigned char *packet, int size, int datalink_type) {
     int ip_header_offset = 0;
     int has_eth = 0;
     uint16_t ether_type = 0;
@@ -55,32 +54,43 @@ void print_packet(const unsigned char *packet, int size) {
     strftime(time_str, sizeof(time_str), "%H:%M:%S", timeinfo);
     printf("[%s] ", time_str);
 
-    const struct ether_header *eth = (const struct ether_header *)packet;
-    ether_type = ntohs(eth->ether_type);
+    if (datalink_type == DLT_EN10MB) {
+        // Ethernet
+        const struct ether_header *eth = (const struct ether_header *)packet;
+        ether_type = ntohs(eth->ether_type);
 
-    // Определяем, есть ли Ethernet-заголовок
-    if (ether_type == ETHERTYPE_IP || ether_type == ETHERTYPE_IPV6 || ether_type == ETHERTYPE_ARP) {
-        has_eth = 1;
-        ip_header_offset = eth_header_len;
+        if (ether_type == ETHERTYPE_IP || ether_type == ETHERTYPE_IPV6 || ether_type == ETHERTYPE_ARP) {
+            has_eth = 1;
+            ip_header_offset = 14;
 
-        // MAC-адреса
-        char src_mac[18], dst_mac[18];
-        snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-                 eth->ether_shost[0], eth->ether_shost[1], eth->ether_shost[2],
-                 eth->ether_shost[3], eth->ether_shost[4], eth->ether_shost[5]);
-        snprintf(dst_mac, sizeof(dst_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-                 eth->ether_dhost[0], eth->ether_dhost[1], eth->ether_dhost[2],
-                 eth->ether_dhost[3], eth->ether_dhost[4], eth->ether_dhost[5]);
+            char src_mac[18], dst_mac[18];
+            snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     eth->ether_shost[0], eth->ether_shost[1], eth->ether_shost[2],
+                     eth->ether_shost[3], eth->ether_shost[4], eth->ether_shost[5]);
+            snprintf(dst_mac, sizeof(dst_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     eth->ether_dhost[0], eth->ether_dhost[1], eth->ether_dhost[2],
+                     eth->ether_dhost[3], eth->ether_dhost[4], eth->ether_dhost[5]);
 
-        printf(COLOR_MAC "MAC %s -> %s\n" COLOR_RESET, src_mac, dst_mac);
+            printf(COLOR_MAC "MAC %s -> %s\n" COLOR_RESET, src_mac, dst_mac);
+        }
+    } else if (datalink_type == DLT_NULL || datalink_type == DLT_LOOP) {
+        // Loopback — IP начинается с 4 байта заголовка (AF_INET в первых 4 байтах)
+        ip_header_offset = 4;
+        // MAC нет в loopback
     } else {
-        ip_header_offset = 0; // вероятно loopback
+        // Другие типы канального уровня — можно расширить
+        ip_header_offset = 0; // на всякий случай
     }
 
     // Обработка ARP
     if (has_eth && ether_type == ETHERTYPE_ARP) {
-        struct arphdr *arp_header = (struct arphdr *)(packet + eth_header_len);
-        unsigned char *arp_ptr = (unsigned char *)(packet + eth_header_len + sizeof(struct arphdr));
+        if (size < ip_header_offset + sizeof(struct arphdr)) {
+            printf("Пакет слишком короткий для ARP\n\n");
+            return;
+        }
+
+        struct arphdr *arp_header = (struct arphdr *)(packet + ip_header_offset);
+        unsigned char *arp_ptr = (unsigned char *)(packet + ip_header_offset + sizeof(struct arphdr));
 
         if (ntohs(arp_header->ar_hrd) == ARPHRD_ETHER && ntohs(arp_header->ar_pro) == ETHERTYPE_IP) {
             char sender_ip[INET_ADDRSTRLEN], target_ip[INET_ADDRSTRLEN];
@@ -120,9 +130,16 @@ void print_packet(const unsigned char *packet, int size) {
         return;
     }
 
-    // Обработка IPv4
-    const struct iphdr *iph = (const struct iphdr *)(packet + ip_header_offset);
-    if ((has_eth && ether_type == ETHERTYPE_IP) || (!has_eth && iph->version == 4)) {
+    // IPv4
+    if ((has_eth && ether_type == ETHERTYPE_IP) || 
+        (!has_eth && size > ip_header_offset && ((packet[ip_header_offset] >> 4) == 4))) {
+
+        if (size < ip_header_offset + sizeof(struct iphdr)) {
+            printf("Пакет слишком короткий для IPv4\n\n");
+            return;
+        }
+
+        const struct iphdr *iph = (const struct iphdr *)(packet + ip_header_offset);
         char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(iph->saddr), src_ip, sizeof(src_ip));
         inet_ntop(AF_INET, &(iph->daddr), dst_ip, sizeof(dst_ip));
@@ -144,8 +161,15 @@ void print_packet(const unsigned char *packet, int size) {
             printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
         }
     }
-    // Обработка IPv6
-    else if ((has_eth && ether_type == ETHERTYPE_IPV6) || (!has_eth && ((packet[ip_header_offset] >> 4) == 6))) {
+    // IPv6
+    else if ((has_eth && ether_type == ETHERTYPE_IPV6) || 
+             (!has_eth && size > ip_header_offset && ((packet[ip_header_offset] >> 4) == 6))) {
+
+        if (size < ip_header_offset + sizeof(struct ip6_hdr)) {
+            printf("Пакет слишком короткий для IPv6\n\n");
+            return;
+        }
+
         struct ip6_hdr *ip6h = (struct ip6_hdr *)(packet + ip_header_offset);
         char src_ip[INET6_ADDRSTRLEN], dst_ip[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &(ip6h->ip6_src), src_ip, sizeof(src_ip));
@@ -162,8 +186,8 @@ void print_packet(const unsigned char *packet, int size) {
 
 
 void packet_handler(unsigned char *args, const struct pcap_pkthdr *header, const unsigned char *packet) {
-    (void)args;
-    print_packet(packet, header->len);
+    int datalink_type = *(int *)args;
+    print_packet(packet, header->len, datalink_type);
 }
 
 char *select_interface() {
@@ -196,6 +220,7 @@ char *select_interface() {
     pcap_freealldevs(alldevs);
     return iface;
 }
+
 
 int main_menu() {
     printf("\nМеню:\n");
@@ -238,6 +263,8 @@ void start_sniffer(const char *iface, const char *filter_exp) {
         return;
     }
 
+    int datalink_type = pcap_datalink(handle);
+
     struct bpf_program fp;
     if (pcap_compile(handle, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
         fprintf(stderr, "Ошибка компиляции фильтра: %s\n", pcap_geterr(handle));
@@ -259,7 +286,8 @@ void start_sniffer(const char *iface, const char *filter_exp) {
 
     signal(SIGINT, signal_handler);
 
-    pcap_loop(handle, -1, packet_handler, NULL);
+    // Передаём указатель на datalink_type в качестве args
+    pcap_loop(handle, -1, packet_handler, (unsigned char *)&datalink_type);
 
     pcap_close(handle);
     handle = NULL;
