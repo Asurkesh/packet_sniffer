@@ -40,8 +40,23 @@ void signal_handler(int sig) {
     }
 }
 
+nt get_ip_header_offset(int datalink_type) {
+    switch (datalink_type) {
+        case DLT_EN10MB:      // Ethernet
+            return 14;
+        case DLT_NULL:        // Loopback (old BSD)
+        case DLT_LOOP:        // Loopback (Linux)
+            return 4;
+        case DLT_LINUX_SLL:   // Linux cooked capture (any)
+            return 16;
+        // Можно добавить DLT_NFLOG, DLT_NFQUEUE и т.п. при необходимости
+        default:
+            return 0;  // Неизвестный — будем считать без смещения
+    }
+}
+
 void print_packet(const unsigned char *packet, int size, int datalink_type) {
-    int ip_header_offset = 0;
+    int ip_header_offset = get_ip_header_offset(datalink_type);
     int has_eth = 0;
     uint16_t ether_type = 0;
 
@@ -56,12 +71,15 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
 
     if (datalink_type == DLT_EN10MB) {
         // Ethernet
+        if (size < 14) {
+            printf("Пакет слишком короткий для Ethernet\n\n");
+            return;
+        }
         const struct ether_header *eth = (const struct ether_header *)packet;
         ether_type = ntohs(eth->ether_type);
 
         if (ether_type == ETHERTYPE_IP || ether_type == ETHERTYPE_IPV6 || ether_type == ETHERTYPE_ARP) {
             has_eth = 1;
-            ip_header_offset = 14;
 
             char src_mac[18], dst_mac[18];
             snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -73,13 +91,6 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
 
             printf(COLOR_MAC "MAC %s -> %s\n" COLOR_RESET, src_mac, dst_mac);
         }
-    } else if (datalink_type == DLT_NULL || datalink_type == DLT_LOOP) {
-        // Loopback — IP начинается с 4 байта заголовка (AF_INET в первых 4 байтах)
-        ip_header_offset = 4;
-        // MAC нет в loopback
-    } else {
-        // Другие типы канального уровня — можно расширить
-        ip_header_offset = 0; // на всякий случай
     }
 
     // Обработка ARP
@@ -145,12 +156,20 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
         inet_ntop(AF_INET, &(iph->daddr), dst_ip, sizeof(dst_ip));
 
         if (iph->protocol == IPPROTO_TCP) {
+            if (size < ip_header_offset + iph->ihl * 4 + sizeof(struct tcphdr)) {
+                printf("Пакет слишком короткий для TCP\n\n");
+                return;
+            }
             const struct tcphdr *tcph = (const struct tcphdr *)(packet + ip_header_offset + iph->ihl * 4);
             printf(COLOR_PROTO "[TCP] " COLOR_RESET);
             printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
                    src_ip, COLOR_PORT, ntohs(tcph->source),
                    dst_ip, COLOR_PORT, ntohs(tcph->dest));
         } else if (iph->protocol == IPPROTO_UDP) {
+            if (size < ip_header_offset + iph->ihl * 4 + sizeof(struct udphdr)) {
+                printf("Пакет слишком короткий для UDP\n\n");
+                return;
+            }
             const struct udphdr *udph = (const struct udphdr *)(packet + ip_header_offset + iph->ihl * 4);
             printf(COLOR_PROTO "[UDP] " COLOR_RESET);
             printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
