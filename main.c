@@ -7,6 +7,8 @@
 #include <time.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <arpa/nameser.h>
+#include <resolv.h>
 
 // Ethernet и ARP
 #include <net/ethernet.h>       // ETH_P_*, struct ether_header
@@ -24,6 +26,31 @@
 // Дубликат для struct ether_header (если <net/ethernet.h> не хватает)
 #include <netinet/if_ether.h>   // struct ether_header, ETHERTYPE_IP
 
+#ifndef TH_FIN
+#define TH_FIN  0x01
+#endif
+#ifndef TH_SYN
+#define TH_SYN  0x02
+#endif
+#ifndef TH_RST
+#define TH_RST  0x04
+#endif
+#ifndef TH_PUSH
+#define TH_PUSH 0x08
+#endif
+#ifndef TH_ACK
+#define TH_ACK  0x10
+#endif
+#ifndef TH_URG
+#define TH_URG  0x20
+#endif
+#ifndef TH_ECE
+#define TH_ECE  0x40
+#endif
+#ifndef TH_CWR
+#define TH_CWR  0x80
+#endif
+
 
 #define COLOR_RESET "\033[0m"
 #define COLOR_PROTO "\033[1;34m"
@@ -31,6 +58,9 @@
 #define COLOR_PORT  "\033[1;33m"
 #define COLOR_SIZE  "\033[1;35m"
 #define COLOR_MAC "\033[1;36m"
+#define COLOR_DNS "\033[1;37m"
+#define COLOR_HTTP "\033[1;40m"
+#define COLOR_ICMP "\033[1;38m"
 
 pcap_t *handle = NULL;
 
@@ -40,7 +70,7 @@ void signal_handler(int sig) {
     }
 }
 
-nt get_ip_header_offset(int datalink_type) {
+int get_ip_header_offset(int datalink_type) {
     switch (datalink_type) {
         case DLT_EN10MB:      // Ethernet
             return 14;
@@ -175,6 +205,8 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
                 if (tcph->th_flags & TH_PUSH) printf("PSH ");
                 if (tcph->th_flags & TH_URG) printf("URG ");
 
+            int payload_offset = get_tcp_payload_offset(packet, size, datalink_type);
+
             if ((ntohs(tcph->th_dport) == 80 || ntohs(tcph->th_sport) == 80 ||
                 ntohs(tcph->th_dport) == 8080 || ntohs(tcph->th_sport) == 8080) &&
                 size > payload_offset) {
@@ -207,18 +239,8 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
             uint16_t sport = ntohs(udph->uh_sport);
             uint16_t dport = ntohs(udph->uh_dport);
             if (sport == 53 || dport == 53) {
-                const unsigned char *dns = packet + ip_header_offset + ip_header_len + sizeof(struct udphdr);
-                int qname_offset = 12; // после заголовка DNS
-
-                printf(COLOR_DNS "DNS очередь/ответ: ");
-                while (dns[qname_offset] != 0 && qname_offset < size) {
-                    int len = dns[qname_offset];
-                    qname_offset++;
-                    for (int j = 0; j < len; j++) {
-                        putchar(dns[qname_offset++]);
-                    }
-                    if (dns[qname_offset] != 0) putchar('.');
-                }
+                print_dns(packet + ip_header_offset + iph->ihl * 4 + sizeof(struct udphdr),
+                  size - ip_header_offset - iph->ihl * 4 - sizeof(struct udphdr));
             }
 
         } else {
@@ -241,21 +263,6 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
         inet_ntop(AF_INET6, &(ip6h->ip6_dst), dst_ip, sizeof(dst_ip));
         printf(COLOR_PROTO "[IPv6] " COLOR_RESET);
         printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
-
-        //
-        if (ip_proto == IPPROTO_ICMP) {
-            const struct icmphdr *icmp = (const struct icmphdr *)(packet + ip_header_offset + ip_header_len);
-            printf(COLOR_ICMP "ICMP тип=%d код=%d", icmp->type, icmp->code);
-            if (icmp->type == 8)
-                printf(" (Echo запрос)");
-            else if (icmp->type == 0)
-                printf(" (Echo ответ)");
-        }
-
-        if (ip_proto == IPPROTO_ICMPV6) {
-            const struct icmp6_hdr *icmp6 = (const struct icmp6_hdr *)(packet + ip_header_offset + ip_header_len);
-            printf(COLOR_ICMP "ICMPv6 тип=%d код=%d\n" COLOR_RESET, icmp6->icmp6_type, icmp6->icmp6_code);
-        }
 
 
     } else {
@@ -405,5 +412,75 @@ int main() {
         free(iface);
     }
     return 0;
+}
+
+int get_tcp_payload_offset(const unsigned char *packet, int size, int datalink_type) {
+    int offset = 0;
+
+    // --- Определение смещения IP ---
+    switch (datalink_type) {
+        case DLT_EN10MB: // Ethernet
+            offset = 14;
+            break;
+        case DLT_NULL:   // Loopback
+        case DLT_LOOP:
+            offset = 4;
+            break;
+        case DLT_RAW:    // IP напрямую
+            offset = 0;
+            break;
+        case DLT_LINUX_SLL: // Linux cooked
+            offset = 16;
+            break;
+        default:
+            return -1; // Unsupported DLT
+    }
+
+    if (size < offset + 1) return -1;
+
+    // --- IPv4 ---
+    uint8_t version = (packet[offset] >> 4);
+    if (version == 4) {
+        if (size < offset + sizeof(struct iphdr)) return -1;
+        const struct iphdr *iph = (const struct ip *)(packet + offset);
+        if (iph->protocol != IPPROTO_TCP) return -1;
+
+        int ip_header_len = iph->ihl * 4;
+        if (size < offset + ip_header_len + sizeof(struct tcphdr)) return -1;
+
+        const struct tcphdr *tcph = (const struct tcphdr *)(packet + offset + ip_header_len);
+        int tcp_header_len = tcph->th_off * 4;
+
+        return offset + ip_header_len + tcp_header_len;
+    }
+}
+
+void print_dns(const unsigned char *dns_data, int dns_size) {
+    // Заголовок DNS
+    struct dnshdr {
+        uint16_t id;
+        uint16_t flags;
+        uint16_t qdcount;
+        uint16_t ancount;
+        uint16_t nscount;
+        uint16_t arcount;
+    };
+    
+    if (dns_size < sizeof(struct dnshdr)) {
+        printf("DNS пакет слишком мал\n");
+        return;
+    }
+
+    const struct dnshdr *dns_header = (const struct dnshdr *)dns_data;
+
+    uint16_t flags = ntohs(dns_header->flags);
+
+    int qr = (flags >> 15) & 0x1; // 0 - запрос, 1 - ответ
+
+    printf(" [DNS %s] ID: %u, Вопросов: %u, Ответов: %u\n",
+           qr ? "ответ" : "запрос",
+           ntohs(dns_header->id),
+           ntohs(dns_header->qdcount),
+           ntohs(dns_header->ancount));
 }
 
