@@ -8,6 +8,9 @@
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <unistd.h>
+#include <netinet/ether.h>   // struct ether_header
+#include <time.h>
+#include <net/if_arp.h>
 
 #define COLOR_RESET "\033[0m"
 #define COLOR_PROTO "\033[1;34m"
@@ -24,31 +27,128 @@ void signal_handler(int sig) {
 }
 
 void print_packet(const u_char *packet, int size) {
-    struct ip *iph = (struct ip*)(packet + 14); // Ethernet header 14 байт
-    char src_ip[INET_ADDRSTRLEN];
-    char dst_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(iph->ip_src), src_ip, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &(iph->ip_dst), dst_ip, INET_ADDRSTRLEN);
+    int eth_header_len = 14;
+    int ip_header_offset = 0;
+    int has_eth = 0;
+    uint16_t ether_type = 0;
 
-    if (iph->ip_p == IPPROTO_TCP) {
-        struct tcphdr *tcph = (struct tcphdr*)(packet + 14 + iph->ip_hl * 4);
-        printf(COLOR_PROTO "[TCP] " COLOR_RESET);
-        printf(COLOR_IP "%s:%s%d" COLOR_RESET, src_ip, COLOR_PORT, ntohs(tcph->source));
-        printf(" -> ");
-        printf(COLOR_IP "%s:%s%d" COLOR_RESET, dst_ip, COLOR_PORT, ntohs(tcph->dest));
-    } else if (iph->ip_p == IPPROTO_UDP) {
-        struct udphdr *udph = (struct udphdr*)(packet + 14 + iph->ip_hl * 4);
-        printf(COLOR_PROTO "[UDP] " COLOR_RESET);
-        printf(COLOR_IP "%s:%s%d" COLOR_RESET, src_ip, COLOR_PORT, ntohs(udph->source));
-        printf(" -> ");
-        printf(COLOR_IP "%s:%s%d" COLOR_RESET, dst_ip, COLOR_PORT, ntohs(udph->dest));
+    const struct ether_header *eth = (const struct ether_header *)packet;
+    ether_type = ntohs(eth->ether_type);
+
+    // Определение Ethernet или loopback
+    if (ether_type == ETHERTYPE_IP || ether_type == ETHERTYPE_IPV6 || ether_type == ETHERTYPE_ARP) {
+        has_eth = 1;
+        ip_header_offset = eth_header_len;
+
+        // MAC-адреса
+        char src_mac[18], dst_mac[18];
+        snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 eth->ether_shost[0], eth->ether_shost[1], eth->ether_shost[2],
+                 eth->ether_shost[3], eth->ether_shost[4], eth->ether_shost[5]);
+        snprintf(dst_mac, sizeof(dst_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 eth->ether_dhost[0], eth->ether_dhost[1], eth->ether_dhost[2],
+                 eth->ether_dhost[3], eth->ether_dhost[4], eth->ether_dhost[5]);
+
+        printf(COLOR_MAC "MAC %s -> %s\n" COLOR_RESET, src_mac, dst_mac);
     } else {
-        printf(COLOR_PROTO "[OTHER %d] " COLOR_RESET, iph->ip_p);
-        printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
+        ip_header_offset = 0; // может быть loopback
     }
 
-    printf(" " COLOR_SIZE "[%d bytes]" COLOR_RESET "\n", size);
+    // Время
+    time_t rawtime;
+    struct tm * timeinfo;
+    char time_str[20];
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", timeinfo);
+    printf("[%s] ", time_str);
+
+    if (has_eth && ether_type == ETHERTYPE_ARP) {
+    struct arphdr *arp_header = (struct arphdr *)(packet + eth_header_len);
+    u_char *arp_ptr = (u_char *)(packet + eth_header_len + sizeof(struct arphdr));
+
+    // Только Ethernet + IPv4
+    if (ntohs(arp_header->ar_hrd) == ARPHRD_ETHER && ntohs(arp_header->ar_pro) == ETHERTYPE_IP) {
+        char sender_ip[INET_ADDRSTRLEN], target_ip[INET_ADDRSTRLEN];
+        char sender_mac[18], target_mac[18];
+
+        // Сдвиги по полям
+        u_char *sender_mac_ptr = arp_ptr;
+        u_char *sender_ip_ptr  = arp_ptr + 6;
+        u_char *target_mac_ptr = arp_ptr + 10;
+        u_char *target_ip_ptr  = arp_ptr + 16;
+
+        // MAC и IP строкой
+        snprintf(sender_mac, sizeof(sender_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 sender_mac_ptr[0], sender_mac_ptr[1], sender_mac_ptr[2],
+                 sender_mac_ptr[3], sender_mac_ptr[4], sender_mac_ptr[5]);
+
+        snprintf(target_mac, sizeof(target_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 target_mac_ptr[0], target_mac_ptr[1], target_mac_ptr[2],
+                 target_mac_ptr[3], target_mac_ptr[4], target_mac_ptr[5]);
+
+        inet_ntop(AF_INET, sender_ip_ptr, sender_ip, sizeof(sender_ip));
+        inet_ntop(AF_INET, target_ip_ptr, target_ip, sizeof(target_ip));
+
+        printf(COLOR_PROTO "[ARP] " COLOR_RESET);
+        if (ntohs(arp_header->ar_op) == ARPOP_REQUEST) {
+            printf("Запрос: кто имеет " COLOR_IP "%s" COLOR_RESET "? Скажите " COLOR_MAC "%s" COLOR_RESET "\n",
+                   target_ip, sender_mac);
+        } else if (ntohs(arp_header->ar_op) == ARPOP_REPLY) {
+            printf("Ответ: " COLOR_IP "%s" COLOR_RESET " имеет MAC " COLOR_MAC "%s" COLOR_RESET "\n",
+                   sender_ip, sender_mac);
+        } else {
+            printf("Неизвестная операция ARP\n");
+        }
+    } else {
+        printf(COLOR_PROTO "[ARP] " COLOR_RESET "(неподдерживаемый формат)\n");
+    }
+
+    printf(COLOR_SIZE "Передан пакет размером [%d байт]" COLOR_RESET "\n", size);
+    printf("/n");
+    return;
 }
+    // IPv4
+    const struct ip *iph = (const struct ip*)(packet + ip_header_offset);
+    if ((has_eth && ether_type == ETHERTYPE_IP) || (!has_eth && iph->ip_v == 4)) {
+        char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(iph->ip_src), src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &(iph->ip_dst), dst_ip, INET_ADDRSTRLEN);
+
+        if (iph->ip_p == IPPROTO_TCP) {
+            const struct tcphdr *tcph = (const struct tcphdr*)(packet + ip_header_offset + iph->ip_hl * 4);
+            printf(COLOR_PROTO "[TCP] " COLOR_RESET);
+            printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
+                   src_ip, COLOR_PORT, ntohs(tcph->source),
+                   dst_ip, COLOR_PORT, ntohs(tcph->dest));
+        } else if (iph->ip_p == IPPROTO_UDP) {
+            const struct udphdr *udph = (const struct udphdr*)(packet + ip_header_offset + iph->ip_hl * 4);
+            printf(COLOR_PROTO "[UDP] " COLOR_RESET);
+            printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
+                   src_ip, COLOR_PORT, ntohs(udph->source),
+                   dst_ip, COLOR_PORT, ntohs(udph->dest));
+        } else {
+            printf(COLOR_PROTO "[Другой %d] " COLOR_RESET, iph->ip_p);
+            printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
+        }
+    }
+    // IPv6
+    else if ((has_eth && ether_type == ETHERTYPE_IPV6) || (!has_eth && ((packet[ip_header_offset] >> 4) == 6))) {
+        char src_ip[INET6_ADDRSTRLEN], dst_ip[INET6_ADDRSTRLEN];
+        struct ip6_hdr *ip6h = (struct ip6_hdr *)(packet + ip_header_offset);
+        inet_ntop(AF_INET6, &(ip6h->ip6_src), src_ip, INET6_ADDRSTRLEN);
+        inet_ntop(AF_INET6, &(ip6h->ip6_dst), dst_ip, INET6_ADDRSTRLEN);
+
+        printf(COLOR_PROTO "[IPv6] " COLOR_RESET);
+        printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
+    } else {
+        printf(COLOR_PROTO "[Неизвестный протокол]" COLOR_RESET);
+    }
+
+    printf(" " COLOR_SIZE "Передан пакет размером [%d байт]" COLOR_RESET "\n", size);
+    printf("\n");
+}
+
 
 void packet_handler(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
     (void)args;
@@ -155,17 +255,16 @@ void start_sniffer(const char *iface, const char *filter_exp) {
 
 int main() {
     while (1) {
-        char *iface = select_interface();
-
         int choice = main_menu();
         if (choice == 3) {
-            free(iface);
             printf("Выход...\n");
             break;
         }
 
+        char *iface = select_interface();
+
         if (choice == 1) {
-            start_sniffer(iface, "ip");
+            start_sniffer(iface, "tcp или udp");
         } else if (choice == 2) {
             char protocol[4] = "tcp";
             int port = 0;
@@ -175,7 +274,7 @@ int main() {
             if (port == 0)
                 snprintf(filter_exp, sizeof(filter_exp), "%s", protocol);
             else
-                snprintf(filter_exp, sizeof(filter_exp), "%s port %d", protocol, port);
+                snprintf(filter_exp, sizeof(filter_exp), "%s порт %d", protocol, port);
 
             start_sniffer(iface, filter_exp);
         } else {
@@ -186,3 +285,4 @@ int main() {
     }
     return 0;
 }
+
