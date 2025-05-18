@@ -75,10 +75,15 @@ Stats stats = {0};
 
 typedef struct {
     char ip[INET_ADDRSTRLEN];
-    unsigned long total;
-    unsigned long tcp;
-    unsigned long udp;
-    unsigned long other;
+    unsigned long total_packets;
+    unsigned long total_bytes;
+    unsigned long tcp_count;
+    unsigned long udp_count;
+    unsigned long icmp_count;
+    unsigned long igmp_count;
+    unsigned long esp_count;
+    unsigned long gre_count;
+    unsigned long other_count;
 } IPStat;
 IPStat ip_stats[MAX_IPS];
 int ip_stats_count = 0;
@@ -304,7 +309,7 @@ void packet_handler(unsigned char *args, const struct pcap_pkthdr *header, const
         char src_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(ip_hdr->ip_src), src_ip, INET_ADDRSTRLEN);
 
-        update_ip_stat(src_ip, ip_hdr->ip_p);
+        update_ip_stat(src_ip, ip_hdr->ip_p, header->len);
 
         if (ip_hdr->ip_p == IPPROTO_TCP)
             stats.tcp_count++;
@@ -465,47 +470,85 @@ int main() {
 void print_statistics() {
     printf("\n===== Общая статистика =====\n");
     printf("Всего пакетов: %lu\n", stats.total_packets);
-    printf("TCP:            %lu\n", stats.tcp_count);
-    printf("UDP:            %lu\n", stats.udp_count);
-    printf("ARP:            %lu\n", stats.arp_count);
-    printf("IPv6:           %lu\n", stats.ipv6_count);
-    printf("Другое:         %lu\n", stats.other_count);
+    printf("TCP:           %lu\n", stats.tcp_count);
+    printf("UDP:           %lu\n", stats.udp_count);
+    printf("ARP:           %lu\n", stats.arp_count);
+    printf("IPv6:          %lu\n", stats.ipv6_count);
+    printf("Другое:        %lu\n", stats.other_count);
 
-    printf("\n===== Статистика по IP =====\n");
+    printf("\n===== Статистика по IP ) =====\n");
+
+    // сортировка
+    qsort(ip_stats, ip_stats_count, sizeof(IPStat), compare_by_bytes_desc);
+
+    printf("%-15s | %6s | %8s | TCP | UDP | ICMP | IGMP | ESP | GRE | Lheujq\n", "IP", "Всего Пакетов", "Размер");
+    printf("------------------------------------------------------------------------\n");
+
     for (int i = 0; i < ip_stats_count; ++i) {
-        printf("IP %s:\n", ip_stats[i].ip);
-        printf("  Всего пакетов: %lu\n", ip_stats[i].total);
-        printf("  TCP:           %lu\n", ip_stats[i].tcp);
-        printf("  UDP:           %lu\n", ip_stats[i].udp);
-        printf("  Другое:        %lu\n", ip_stats[i].other);
+        printf("%-15s | %6lu | %8lu | %3lu | %3lu |  %3lu |  %3lu | %3lu | %3lu |  %3lu\n",
+            ip_stats[i].ip,
+            ip_stats[i].total_packets,
+            ip_stats[i].total_bytes,
+            ip_stats[i].tcp_count,
+            ip_stats[i].udp_count,
+            ip_stats[i].icmp_count,
+            ip_stats[i].igmp_count,
+            ip_stats[i].esp_count,
+            ip_stats[i].gre_count,
+            ip_stats[i].other_count
+        );
     }
-    printf("=============================\n");
+
+    printf("=====================================================\n");
+}
+
+int compare_by_bytes_desc(const void *a, const void *b) {
+    const IPStat *statA = (const IPStat *)a;
+    const IPStat *statB = (const IPStat *)b;
+    if (statB->total_bytes > statA->total_bytes) return 1;
+    if (statB->total_bytes < statA->total_bytes) return -1;
+    return 0;
 }
 
 
-void update_ip_stat(const char *ip, u_char protocol) {
+void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
     for (int i = 0; i < ip_stats_count; ++i) {
         if (strcmp(ip_stats[i].ip, ip) == 0) {
-            ip_stats[i].total++;
-            if (protocol == IPPROTO_TCP)
-                ip_stats[i].tcp++;
-            else if (protocol == IPPROTO_UDP)
-                ip_stats[i].udp++;
-            else
-                ip_stats[i].other++;
+            ip_stats[i].total_packets++;
+            ip_stats[i].total_bytes += pkt_len;
+            switch (proto) {
+                case IPPROTO_TCP: ip_stats[i].tcp_count++; break;
+                case IPPROTO_UDP: ip_stats[i].udp_count++; break;
+                case IPPROTO_ICMP: ip_stats[i].icmp_count++; break;
+                case IPPROTO_IGMP: ip_stats[i].igmp_count++; break;
+                case IPPROTO_ESP: ip_stats[i].esp_count++; break;
+                case IPPROTO_GRE: ip_stats[i].gre_count++; break;
+                default: ip_stats[i].other_count++; break;
+            }
             return;
         }
     }
-    if (ip_stats_count < MAX_IPS) {
-        strncpy(ip_stats[ip_stats_count].ip, ip, INET_ADDRSTRLEN - 1);
-        ip_stats[ip_stats_count].ip[INET_ADDRSTRLEN - 1] = '\0';
-        ip_stats[ip_stats_count].total = 1;
-        ip_stats[ip_stats_count].tcp = (protocol == IPPROTO_TCP) ? 1 : 0;
-        ip_stats[ip_stats_count].udp = (protocol == IPPROTO_UDP) ? 1 : 0;
-        ip_stats[ip_stats_count].other = (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP) ? 1 : 0;
-        ip_stats_count++;
+
+    if (ip_stats_count >= MAX_IPS) return;
+
+    IPStat new_stat = {0};
+    strncpy(new_stat.ip, ip, INET_ADDRSTRLEN);
+    new_stat.total_packets = 1;
+    new_stat.total_bytes = pkt_len;
+
+    switch (proto) {
+        case IPPROTO_TCP: new_stat.tcp_count = 1; break;
+        case IPPROTO_UDP: new_stat.udp_count = 1; break;
+        case IPPROTO_ICMP: new_stat.icmp_count = 1; break;
+        case IPPROTO_IGMP: new_stat.igmp_count = 1; break;
+        case IPPROTO_ESP: new_stat.esp_count = 1; break;
+        case IPPROTO_GRE: new_stat.gre_count = 1; break;
+        default: new_stat.other_count = 1; break;
     }
+
+    ip_stats[ip_stats_count++] = new_stat;
 }
+
 
 
 int get_tcp_payload_offset(const unsigned char *packet, int size, int datalink_type) {
