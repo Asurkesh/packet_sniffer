@@ -61,6 +61,27 @@
 #define COLOR_DNS "\033[1;37m"
 #define COLOR_HTTP "\033[1;40m"
 #define COLOR_ICMP "\033[1;38m"
+#define MAX_IPS 1000
+
+typedef struct {
+    unsigned long total_packets;
+    unsigned long tcp_count;
+    unsigned long udp_count;
+    unsigned long arp_count;
+    unsigned long ipv6_count;
+    unsigned long other_count;
+} Stats;
+Stats stats = {0};
+
+typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    unsigned long total;
+    unsigned long tcp;
+    unsigned long udp;
+    unsigned long other;
+} IPStat;
+IPStat ip_stats[MAX_IPS];
+int ip_stats_count = 0;
 
 pcap_t *handle = NULL;
 
@@ -79,7 +100,6 @@ int get_ip_header_offset(int datalink_type) {
             return 4;
         case DLT_LINUX_SLL:   // Linux cooked capture (any)
             return 16;
-        // Можно добавить DLT_NFLOG, DLT_NFQUEUE и т.п. при необходимости
         default:
             return 0;  // Неизвестный — будем считать без смещения
     }
@@ -113,11 +133,11 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
 
             char src_mac[18], dst_mac[18];
             snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-                     eth->ether_shost[0], eth->ether_shost[1], eth->ether_shost[2],
-                     eth->ether_shost[3], eth->ether_shost[4], eth->ether_shost[5]);
+                    eth->ether_shost[0], eth->ether_shost[1], eth->ether_shost[2],
+                    eth->ether_shost[3], eth->ether_shost[4], eth->ether_shost[5]);
             snprintf(dst_mac, sizeof(dst_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-                     eth->ether_dhost[0], eth->ether_dhost[1], eth->ether_dhost[2],
-                     eth->ether_dhost[3], eth->ether_dhost[4], eth->ether_dhost[5]);
+                    eth->ether_dhost[0], eth->ether_dhost[1], eth->ether_dhost[2],
+                    eth->ether_dhost[3], eth->ether_dhost[4], eth->ether_dhost[5]);
 
             printf(COLOR_MAC "MAC %s -> %s\n" COLOR_RESET, src_mac, dst_mac);
         }
@@ -250,7 +270,7 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
     }
     // IPv6
     else if ((has_eth && ether_type == ETHERTYPE_IPV6) || 
-             (!has_eth && size > ip_header_offset && ((packet[ip_header_offset] >> 4) == 6))) {
+            (!has_eth && size > ip_header_offset && ((packet[ip_header_offset] >> 4) == 6))) {
 
         if (size < ip_header_offset + sizeof(struct ip6_hdr)) {
             printf("Пакет слишком короткий для IPv6\n\n");
@@ -275,7 +295,32 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
 
 void packet_handler(unsigned char *args, const struct pcap_pkthdr *header, const unsigned char *packet) {
     int datalink_type = *(int *)args;
+    stats.total_packets++;
+    const struct ether_header *eth_header = (struct ether_header *)packet;
+    u_short ether_type = ntohs(eth_header->ether_type);
+
+    if (ether_type == ETHERTYPE_IP) {
+        const struct ip *ip_hdr = (struct ip *)(packet + 14);
+        char src_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(ip_hdr->ip_src), src_ip, INET_ADDRSTRLEN);
+
+        update_ip_stat(src_ip, ip_hdr->ip_p);
+
+        if (ip_hdr->ip_p == IPPROTO_TCP)
+            stats.tcp_count++;
+        else if (ip_hdr->ip_p == IPPROTO_UDP)
+            stats.udp_count++;
+        else
+            stats.other_count++;
+    } else if (ether_type == ETHERTYPE_IPV6) {
+        stats.ipv6_count++;
+    } else if (ether_type == ETHERTYPE_ARP) {
+        stats.arp_count++;
+    } else {
+        stats.other_count++;
+    }
     print_packet(packet, header->len, datalink_type);
+
 }
 
 char *select_interface() {
@@ -314,7 +359,8 @@ int main_menu() {
     printf("\nМеню:\n");
     printf("1. Слушать все пакеты\n");
     printf("2. Фильтрация по протоколу и порту\n");
-    printf("3. Выход\n");
+    printf("3. Показать статистику\n");
+    printf("4. Выход\n");
     printf("Ваш выбор: ");
     int choice;
     if (scanf("%d", &choice) != 1) {
@@ -384,7 +430,7 @@ void start_sniffer(const char *iface, const char *filter_exp) {
 int main() {
     while (1) {
         int choice = main_menu();
-        if (choice == 3) {
+        if (choice == 4) {
             printf("Выход...\n");
             break;
         }
@@ -405,6 +451,8 @@ int main() {
                 snprintf(filter_exp, sizeof(filter_exp), "%s port %d", protocol, port);
 
             start_sniffer(iface, filter_exp);
+        } else if (choice == 3) {
+            print_statistics();
         } else {
             printf("Неверный выбор\n");
         }
@@ -413,6 +461,52 @@ int main() {
     }
     return 0;
 }
+
+void print_statistics() {
+    printf("\n===== Общая статистика =====\n");
+    printf("Всего пакетов: %lu\n", stats.total_packets);
+    printf("TCP:            %lu\n", stats.tcp_count);
+    printf("UDP:            %lu\n", stats.udp_count);
+    printf("ARP:            %lu\n", stats.arp_count);
+    printf("IPv6:           %lu\n", stats.ipv6_count);
+    printf("Другое:         %lu\n", stats.other_count);
+
+    printf("\n===== Статистика по IP =====\n");
+    for (int i = 0; i < ip_stats_count; ++i) {
+        printf("IP %s:\n", ip_stats[i].ip);
+        printf("  Всего пакетов: %lu\n", ip_stats[i].total);
+        printf("  TCP:           %lu\n", ip_stats[i].tcp);
+        printf("  UDP:           %lu\n", ip_stats[i].udp);
+        printf("  Другое:        %lu\n", ip_stats[i].other);
+    }
+    printf("=============================\n");
+}
+
+
+void update_ip_stat(const char *ip, u_char protocol) {
+    for (int i = 0; i < ip_stats_count; ++i) {
+        if (strcmp(ip_stats[i].ip, ip) == 0) {
+            ip_stats[i].total++;
+            if (protocol == IPPROTO_TCP)
+                ip_stats[i].tcp++;
+            else if (protocol == IPPROTO_UDP)
+                ip_stats[i].udp++;
+            else
+                ip_stats[i].other++;
+            return;
+        }
+    }
+    if (ip_stats_count < MAX_IPS) {
+        strncpy(ip_stats[ip_stats_count].ip, ip, INET_ADDRSTRLEN - 1);
+        ip_stats[ip_stats_count].ip[INET_ADDRSTRLEN - 1] = '\0';
+        ip_stats[ip_stats_count].total = 1;
+        ip_stats[ip_stats_count].tcp = (protocol == IPPROTO_TCP) ? 1 : 0;
+        ip_stats[ip_stats_count].udp = (protocol == IPPROTO_UDP) ? 1 : 0;
+        ip_stats[ip_stats_count].other = (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP) ? 1 : 0;
+        ip_stats_count++;
+    }
+}
+
 
 int get_tcp_payload_offset(const unsigned char *packet, int size, int datalink_type) {
     int offset = 0;
@@ -478,9 +572,9 @@ void print_dns(const unsigned char *dns_data, int dns_size) {
     int qr = (flags >> 15) & 0x1; // 0 - запрос, 1 - ответ
 
     printf(" [DNS %s] ID: %u, Вопросов: %u, Ответов: %u\n",
-           qr ? "ответ" : "запрос",
-           ntohs(dns_header->id),
-           ntohs(dns_header->qdcount),
-           ntohs(dns_header->ancount));
+        qr ? "ответ" : "запрос",
+        ntohs(dns_header->id),
+        ntohs(dns_header->qdcount),
+        ntohs(dns_header->ancount));
 }
 
