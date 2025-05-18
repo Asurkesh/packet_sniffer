@@ -103,6 +103,8 @@ int queue_end = 0;
 pthread_mutex_t ip_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+volatile bool resolver_running = true;
+
 
 pcap_t *handle = NULL;
 
@@ -333,6 +335,10 @@ void enqueue_ip(const char* ip) {
 int dequeue_ip(char* ip_out) {
     pthread_mutex_lock(&queue_mutex);
     while (queue_is_empty()) {
+        if (!resolver_running) {
+            pthread_mutex_unlock(&queue_mutex);
+            return 0;  // завершение
+        }
         pthread_cond_wait(&queue_cond, &queue_mutex);
     }
     strncpy(ip_out, resolve_queue[queue_start].ip, INET_ADDRSTRLEN);
@@ -342,10 +348,10 @@ int dequeue_ip(char* ip_out) {
     return 1;
 }
 
+
 void *resolver_thread_func(void *arg) {
     while (1) {
-        char ips[INET_ADDRSTRLEN];
-        char *ip = dequeue_ip(ips);
+        char *ip = dequeue_ip(ip);
         if (ip == NULL) { // время завершаться
             break;
         }
@@ -366,7 +372,6 @@ void *resolver_thread_func(void *arg) {
             }
             pthread_mutex_unlock(&queue_mutex);
         }
-        free(ip);
     }
     return NULL;
 }
@@ -548,6 +553,7 @@ int main() {
     }
 
     pthread_mutex_lock(&queue_mutex);
+    resolver_running = false;
     pthread_cond_signal(&queue_cond);
     pthread_mutex_unlock(&queue_mutex);
 
@@ -607,6 +613,8 @@ void print_statistics() {
 }
 
 void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
+    pthread_mutex_lock(&queue_mutex);
+
     for (int i = 0; i < ip_stats_count; ++i) {
         if (strcmp(ip_stats[i].ip, ip) == 0) {
             ip_stats[i].total_packets++;
@@ -645,10 +653,10 @@ void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
     new_stat.resolved = 0;          // флаг неразрешённого имени
 
     ip_stats[ip_stats_count++] = new_stat;
-
+    enqueue_ip(ip);
     pthread_mutex_unlock(&queue_mutex);
     // Добавляем IP в очередь на асинхронный резолвинг
-    enqueue_ip(ip);
+    
 }
 
 int get_tcp_payload_offset(const unsigned char *packet, int size, int datalink_type) {
