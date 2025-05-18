@@ -123,29 +123,30 @@ void print_packet(const unsigned char *packet, int size) {
     return;
 }
     // IPv4
-    const struct ip *iph = (const struct ip*)(packet + ip_header_offset);
-    if ((has_eth && ether_type == ETHERTYPE_IP) || (!has_eth && 2->ip_v == 4)) {
+    const struct iphdr *iph = (const struct iphdr*)(packet + ip_header_offset);
+    if ((has_eth && ether_type == ETHERTYPE_IP) || (!has_eth && iph->version == 4)) {
         char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &(iph->ip_src), src_ip, INET_ADDRSTRLEN);
-        inet_ntop(AF_INET, &(iph->ip_dst), dst_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &(iph->saddr), src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &(iph->daddr), dst_ip, INET_ADDRSTRLEN);
 
-        if (iph->ip_p == IPPROTO_TCP) {
-            const struct tcphdr *tcph = (const struct tcphdr*)(packet + ip_header_offset + iph->ip_hl * 4);
+        if (iph->protocol == IPPROTO_TCP) {
+            const struct tcphdr *tcph = (const struct tcphdr*)(packet + ip_header_offset + iph->ihl * 4);
             printf(COLOR_PROTO "[TCP] " COLOR_RESET);
             printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
-                   src_ip, COLOR_PORT, ntohs(tcph->source),
-                   dst_ip, COLOR_PORT, ntohs(tcph->dest));
-        } else if (iph->ip_p == IPPROTO_UDP) {
-            const struct udphdr *udph = (const struct udphdr*)(packet + ip_header_offset + iph->ip_hl * 4);
+                src_ip, COLOR_PORT, ntohs(tcph->source),
+                dst_ip, COLOR_PORT, ntohs(tcph->dest));
+        } else if (iph->protocol == IPPROTO_UDP) {
+            const struct udphdr *udph = (const struct udphdr*)(packet + ip_header_offset + iph->ihl * 4);
             printf(COLOR_PROTO "[UDP] " COLOR_RESET);
             printf(COLOR_IP "%s:%s%d" COLOR_RESET " -> " COLOR_IP "%s:%s%d" COLOR_RESET,
-                   src_ip, COLOR_PORT, ntohs(udph->source),
-                   dst_ip, COLOR_PORT, ntohs(udph->dest));
+                src_ip, COLOR_PORT, ntohs(udph->source),
+                dst_ip, COLOR_PORT, ntohs(udph->dest));
         } else {
-            printf(COLOR_PROTO "[Другой %d] " COLOR_RESET, iph->ip_p);
+            printf(COLOR_PROTO "[Другой %d] " COLOR_RESET, iph->protocol);
             printf(COLOR_IP "%s" COLOR_RESET " -> " COLOR_IP "%s" COLOR_RESET, src_ip, dst_ip);
         }
     }
+
     // IPv6
     else if ((has_eth && ether_type == ETHERTYPE_IPV6) || (!has_eth && ((packet[ip_header_offset] >> 4) == 6))) {
         char src_ip[INET6_ADDRSTRLEN], dst_ip[INET6_ADDRSTRLEN];
