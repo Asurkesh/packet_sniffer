@@ -1,6 +1,7 @@
 #include <pcap.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
@@ -10,7 +11,6 @@
 #include <arpa/nameser.h>
 #include <resolv.h>
 #include <netdb.h>
-#include <pthread.h>
 #include <ctype.h>
 
 // Ethernet и ARP
@@ -65,7 +65,6 @@
 #define COLOR_HTTP "\033[1;40m"
 #define COLOR_ICMP "\033[1;38m"
 #define MAX_IPS 1000
-#define MAX_QUEUE 100
 
 typedef struct {
     unsigned long total_packets;
@@ -79,7 +78,6 @@ Stats stats = {0};
 
 typedef struct {
     char ip[INET_ADDRSTRLEN];
-    char hostname[NI_MAXHOST];
     unsigned long total_packets;
     unsigned long total_bytes;
     unsigned long tcp_count;
@@ -89,21 +87,9 @@ typedef struct {
     unsigned long esp_count;
     unsigned long gre_count;
     unsigned long other_count;
-    int resolved;
 } IpStat;
 IpStat ip_stats[MAX_IPS];
 int ip_stats_count = 0;
-
-typedef struct {
-    char ip[INET_ADDRSTRLEN];
-} ResolveRequest;
-ResolveRequest resolve_queue[MAX_QUEUE];
-int queue_start = 0;
-int queue_end = 0;
-pthread_mutex_t ip_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
-volatile bool resolver_running = true;
 
 
 pcap_t *handle = NULL;
@@ -313,72 +299,6 @@ void print_packet(const unsigned char *packet, int size, int datalink_type) {
     printf(" " COLOR_SIZE "Передан пакет размером [%d байт]" COLOR_RESET "\n\n", size);
 }
 
-int queue_is_empty() {
-    return queue_start == queue_end;
-}
-
-int queue_is_full() {
-    return ((queue_end + 1) % MAX_QUEUE) == queue_start;
-}
-
-void enqueue_ip(const char* ip) {
-    pthread_mutex_lock(&queue_mutex);
-    if (!queue_is_full()) {
-        strncpy(resolve_queue[queue_end].ip, ip, INET_ADDRSTRLEN);
-        resolve_queue[queue_end].ip[INET_ADDRSTRLEN - 1] = '\0';
-        queue_end = (queue_end + 1) % MAX_QUEUE;
-        pthread_cond_signal(&queue_cond);
-    }
-    pthread_mutex_unlock(&queue_mutex);
-}
-
-int dequeue_ip(char* ip_out) {
-    pthread_mutex_lock(&queue_mutex);
-    while (queue_is_empty()) {
-        if (!resolver_running) {
-            pthread_mutex_unlock(&queue_mutex);
-            return 0;  // завершение
-        }
-        pthread_cond_wait(&queue_cond, &queue_mutex);
-    }
-    strncpy(ip_out, resolve_queue[queue_start].ip, INET_ADDRSTRLEN);
-    ip_out[INET_ADDRSTRLEN - 1] = '\0';
-    queue_start = (queue_start + 1) % MAX_QUEUE;
-    pthread_mutex_unlock(&queue_mutex);
-    return 1;
-}
-
-
-void *resolver_thread_func(void *arg) {
-    char ip[INET_ADDRSTRLEN];
-
-    while (1) {
-        if (!dequeue_ip(ip)) {
-            break; // resolver_running == false и очередь пуста
-        }
-
-        struct sockaddr_in sa;
-        char host[NI_MAXHOST];
-        sa.sin_family = AF_INET;
-        inet_pton(AF_INET, ip, &(sa.sin_addr));
-
-        int res = getnameinfo((struct sockaddr*)&sa, sizeof(sa), host, sizeof(host), NULL, 0, 0);
-        if (res == 0) {
-            pthread_mutex_lock(&queue_mutex);
-            for (int i = 0; i < ip_stats_count; ++i) {
-                if (strcmp(ip_stats[i].ip, ip) == 0) {
-                    strncpy(ip_stats[i].hostname, host, NI_MAXHOST);
-                    ip_stats[i].resolved = 1;
-                    break;
-                }
-            }
-            pthread_mutex_unlock(&queue_mutex);
-        }
-    }
-
-    return NULL;
-}
-
 
 void packet_handler(unsigned char *args, const struct pcap_pkthdr *header, const unsigned char *packet) {
     int datalink_type = *(int *)args;
@@ -514,15 +434,8 @@ void start_sniffer(const char *iface, const char *filter_exp) {
     handle = NULL;
 }
 
-void clear_ip_queue() {
-    pthread_mutex_lock(&queue_mutex);
-    queue_start =queue_end = 0;
-    pthread_mutex_unlock(&queue_mutex);
-}
 
 int main() {
-    pthread_t resolver_thread;
-    pthread_create(&resolver_thread, NULL, resolver_thread_func, NULL);
     while (1) {
         int choice = main_menu();
         if (choice == 4) {
@@ -554,16 +467,6 @@ int main() {
 
         free(iface);
     }
-
-    pthread_mutex_lock(&queue_mutex);
-    resolver_running = false;
-    pthread_cond_signal(&queue_cond);
-    pthread_mutex_unlock(&queue_mutex);
-
-    pthread_join(resolver_thread, NULL);
-
-    clear_ip_queue();
-
     return 0;
 }
 
@@ -589,16 +492,11 @@ void print_statistics() {
     // сортировка
     qsort(ip_stats, ip_stats_count, sizeof(IpStat), compare_by_bytes_desc);
     printf("%-40s | %6s | %8s | TCP | UDP | ICMP | IGMP | ESP | GRE | Другое\n", 
-           "IP / Hostname", "Всего Пакетов", "Размер");
+           "IP ", "Всего Пакетов", "Размер");
     printf("--------------------------------------------------------------------------------------\n");
 
-    for (int i = 0; i < ip_stats_count; ++i) {
-        const char* display_name = (ip_stats[i].resolved && ip_stats[i].hostname[0] != '\0') 
-                                    ? ip_stats[i].hostname 
-                                    : ip_stats[i].ip;
-
         printf("%-40s | %6lu | %8lu | %3lu | %3lu |  %3lu |  %3lu | %3lu | %3lu |  %3lu\n",
-            display_name,
+            ip_stats[i].ip,
             ip_stats[i].total_packets,
             ip_stats[i].total_bytes,
             ip_stats[i].tcp_count,
@@ -616,8 +514,6 @@ void print_statistics() {
 }
 
 void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
-    pthread_mutex_lock(&queue_mutex);
-
     // Поиск существующего IP в статистике
     for (int i = 0; i < ip_stats_count; ++i) {
         if (strcmp(ip_stats[i].ip, ip) == 0) {
@@ -632,14 +528,12 @@ void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
                 case IPPROTO_GRE: ip_stats[i].gre_count++; break;
                 default: ip_stats[i].other_count++; break;
             }
-            pthread_mutex_unlock(&queue_mutex);
             return;
         }
     }
 
     // Если лимит достигнут — просто игнорировать
     if (ip_stats_count >= MAX_IPS) {
-        pthread_mutex_unlock(&queue_mutex);
         return;
     }
 
@@ -658,26 +552,8 @@ void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
         case IPPROTO_GRE: new_stat.gre_count = 1; break;
         default: new_stat.other_count = 1; break;
     }
-
-    new_stat.hostname[0] = '\0';
-    new_stat.resolved = 0;
-
     ip_stats[ip_stats_count++] = new_stat;
 
-    // Проверка на дубликат IP в очереди
-    int already_queued = 0;
-    for (int i = queue_start; i != queue_end; i = (i + 1) % MAX_QUEUE) {
-        if (strcmp(resolve_queue[i].ip, ip) == 0) {
-            already_queued = 1;
-            break;
-        }
-    }
-
-    if (!already_queued) {
-        enqueue_ip(ip);  // добавляем только если не было
-    }
-
-    pthread_mutex_unlock(&queue_mutex);
 }
 
 int get_tcp_payload_offset(const unsigned char *packet, int size, int datalink_type) {
