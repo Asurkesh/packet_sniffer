@@ -1,12 +1,27 @@
 {
-"version": "2.0.0",
-"tasks": [
-    {
-    "label": "Скомпилировать sniffer",
-    "type": "shell",
-    "command": "make",
-    "group": "build",
-    "problemMatcher": []
-    }
-]
+  "label": "Скомпилировать sniffer",
+  "type": "shell",
+  "command": "gcc",
+  "args": [
+    "main.c",
+    "-o",
+    "sniffer",
+    "-lpcap"
+  ],
+  "options": {
+    "cwd": "${workspaceFolder}"
+  },
+  "problemMatcher": [],
+  "group": {
+    "kind": "build",
+    "isDefault": true
+  },
+  "postBuildTask": {
+    "label": "setcap sniffer"
+  }
+},
+{
+  "label": "setcap sniffer",
+  "type": "shell",
+  "command": "sudo setcap cap_net_raw,cap_net_admin=eip ${workspaceFolder}/sniffer"
 }
