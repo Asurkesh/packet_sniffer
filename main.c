@@ -350,10 +350,11 @@ int dequeue_ip(char* ip_out) {
 
 
 void *resolver_thread_func(void *arg) {
+    char ip[INET_ADDRSTRLEN];
+
     while (1) {
-        char *ip = dequeue_ip(ip);
-        if (ip == NULL) { // время завершаться
-            break;
+        if (!dequeue_ip(ip)) {
+            break; // resolver_running == false и очередь пуста
         }
 
         struct sockaddr_in sa;
@@ -367,12 +368,14 @@ void *resolver_thread_func(void *arg) {
             for (int i = 0; i < ip_stats_count; ++i) {
                 if (strcmp(ip_stats[i].ip, ip) == 0) {
                     strncpy(ip_stats[i].hostname, host, NI_MAXHOST);
+                    ip_stats[i].resolved = 1;
                     break;
                 }
             }
             pthread_mutex_unlock(&queue_mutex);
         }
     }
+
     return NULL;
 }
 
@@ -585,7 +588,7 @@ void print_statistics() {
 
     // сортировка
     qsort(ip_stats, ip_stats_count, sizeof(IpStat), compare_by_bytes_desc);
-     printf("%-40s | %6s | %8s | TCP | UDP | ICMP | IGMP | ESP | GRE | Другое\n", 
+    printf("%-40s | %6s | %8s | TCP | UDP | ICMP | IGMP | ESP | GRE | Другое\n", 
            "IP / Hostname", "Всего Пакетов", "Размер");
     printf("--------------------------------------------------------------------------------------\n");
 
@@ -615,6 +618,7 @@ void print_statistics() {
 void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
     pthread_mutex_lock(&queue_mutex);
 
+    // Поиск существующего IP в статистике
     for (int i = 0; i < ip_stats_count; ++i) {
         if (strcmp(ip_stats[i].ip, ip) == 0) {
             ip_stats[i].total_packets++;
@@ -628,12 +632,18 @@ void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
                 case IPPROTO_GRE: ip_stats[i].gre_count++; break;
                 default: ip_stats[i].other_count++; break;
             }
+            pthread_mutex_unlock(&queue_mutex);
             return;
         }
     }
 
-    if (ip_stats_count >= MAX_IPS) return;
+    // Если лимит достигнут — просто игнорировать
+    if (ip_stats_count >= MAX_IPS) {
+        pthread_mutex_unlock(&queue_mutex);
+        return;
+    }
 
+    // Создание новой записи
     IpStat new_stat = {0};
     strncpy(new_stat.ip, ip, INET_ADDRSTRLEN);
     new_stat.total_packets = 1;
@@ -649,14 +659,25 @@ void update_ip_stat(const char *ip, u_char proto, u_int pkt_len) {
         default: new_stat.other_count = 1; break;
     }
 
-    new_stat.hostname[0] = '\0';    // пока имя хоста не разрешено
-    new_stat.resolved = 0;          // флаг неразрешённого имени
+    new_stat.hostname[0] = '\0';
+    new_stat.resolved = 0;
 
     ip_stats[ip_stats_count++] = new_stat;
-    enqueue_ip(ip);
+
+    // Проверка на дубликат IP в очереди
+    int already_queued = 0;
+    for (int i = queue_start; i != queue_end; i = (i + 1) % MAX_QUEUE) {
+        if (strcmp(resolve_queue[i].ip, ip) == 0) {
+            already_queued = 1;
+            break;
+        }
+    }
+
+    if (!already_queued) {
+        enqueue_ip(ip);  // добавляем только если не было
+    }
+
     pthread_mutex_unlock(&queue_mutex);
-    // Добавляем IP в очередь на асинхронный резолвинг
-    
 }
 
 int get_tcp_payload_offset(const unsigned char *packet, int size, int datalink_type) {
