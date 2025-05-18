@@ -11,12 +11,27 @@
 #include <netinet/ether.h>   // struct ether_header
 #include <time.h>
 #include <net/if_arp.h>
+#include <net/ethernet.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pcap.h>
+#include <arpa/inet.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <netinet/if_ether.h>
+#include <netinet/ip_icmp.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 
 #define COLOR_RESET "\033[0m"
 #define COLOR_PROTO "\033[1;34m"
 #define COLOR_IP    "\033[1;32m"
 #define COLOR_PORT  "\033[1;33m"
 #define COLOR_SIZE  "\033[1;35m"
+#define COLOR_MAC "\033[1;36m"
 
 pcap_t *handle = NULL;
 
@@ -26,7 +41,7 @@ void signal_handler(int sig) {
     }
 }
 
-void print_packet(const u_char *packet, int size) {
+void print_packet(const unsigned char *packet, int size) {
     int eth_header_len = 14;
     int ip_header_offset = 0;
     int has_eth = 0;
@@ -65,7 +80,7 @@ void print_packet(const u_char *packet, int size) {
 
     if (has_eth && ether_type == ETHERTYPE_ARP) {
     struct arphdr *arp_header = (struct arphdr *)(packet + eth_header_len);
-    u_char *arp_ptr = (u_char *)(packet + eth_header_len + sizeof(struct arphdr));
+    unsigned char *arp_ptr = (unsigned char *)(packet + eth_header_len + sizeof(struct arphdr));
 
     // Только Ethernet + IPv4
     if (ntohs(arp_header->ar_hrd) == ARPHRD_ETHER && ntohs(arp_header->ar_pro) == ETHERTYPE_IP) {
@@ -73,10 +88,10 @@ void print_packet(const u_char *packet, int size) {
         char sender_mac[18], target_mac[18];
 
         // Сдвиги по полям
-        u_char *sender_mac_ptr = arp_ptr;
-        u_char *sender_ip_ptr  = arp_ptr + 6;
-        u_char *target_mac_ptr = arp_ptr + 10;
-        u_char *target_ip_ptr  = arp_ptr + 16;
+        unsigned char *sender_mac_ptr = arp_ptr;
+        unsigned char *sender_ip_ptr  = arp_ptr + 6;
+        unsigned char *target_mac_ptr = arp_ptr + 10;
+        unsigned char *target_ip_ptr  = arp_ptr + 16;
 
         // MAC и IP строкой
         snprintf(sender_mac, sizeof(sender_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -110,7 +125,7 @@ void print_packet(const u_char *packet, int size) {
 }
     // IPv4
     const struct ip *iph = (const struct ip*)(packet + ip_header_offset);
-    if ((has_eth && ether_type == ETHERTYPE_IP) || (!has_eth && iph->ip_v == 4)) {
+    if ((has_eth && ether_type == ETHERTYPE_IP) || (!has_eth && 2->ip_v == 4)) {
         char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(iph->ip_src), src_ip, INET_ADDRSTRLEN);
         inet_ntop(AF_INET, &(iph->ip_dst), dst_ip, INET_ADDRSTRLEN);
@@ -150,7 +165,7 @@ void print_packet(const u_char *packet, int size) {
 }
 
 
-void packet_handler(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
+void packet_handler(unsigned char *args, const struct pcap_pkthdr *header, const unsigned char *packet) {
     (void)args;
     print_packet(packet, header->len);
 }
