@@ -1,4 +1,4 @@
 sniffer
 
-*.0
+*.o
 *.exe
